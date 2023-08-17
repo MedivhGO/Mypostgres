@@ -10,12 +10,63 @@ extern "C" {
 #include "../../../../src/include/postgres.h"
 #include "../../../../src/include/fmgr.h"
 #include "../../../../src/include/foreign/fdwapi.h"
+
+#include "access/htup_details.h"
+#include "access/parallel.h"
+#include "access/sysattr.h"
+#include "access/nbtree.h"
+#include "access/reloptions.h"
+#include "catalog/pg_foreign_table.h"
+#include "catalog/pg_type.h"
+#include "commands/defrem.h"
+#include "commands/explain.h"
+#include "executor/spi.h"
+#include "executor/tuptable.h"
+#include "foreign/foreign.h"
+#include "miscadmin.h"
+#include "nodes/execnodes.h"
+#include "nodes/nodeFuncs.h"
+#include "nodes/makefuncs.h"
+#include "optimizer/cost.h"
+#include "optimizer/pathnode.h"
+#include "optimizer/paths.h"
+#include "optimizer/planmain.h"
+#include "optimizer/restrictinfo.h"
+#include "parser/parse_coerce.h"
+#include "parser/parse_func.h"
+#include "parser/parse_oper.h"
+#include "parser/parse_type.h"
+#include "utils/builtins.h"
+#include "utils/jsonb.h"
+#include "utils/lsyscache.h"
+#include "utils/memutils.h"
+#include "utils/memdebug.h"
+#include "utils/regproc.h"
+#include "utils/rel.h"
+#include "utils/timestamp.h"
+#include "utils/typcache.h"
+
+#if PG_VERSION_NUM < 120000
+#include "nodes/relation.h"
+#include "optimizer/var.h"
+#else
+#include "access/table.h"
+#include "access/relation.h"
+#include "optimizer/optimizer.h"
+#endif
+
+#if PG_VERSION_NUM < 110000
+#include "catalog/pg_am.h"
+#else
+#include "catalog/pg_am_d.h"
+#endif
+
 }
 // clang-format on
 
 struct Db721FdwPlanState
 {
-    List * filename;
+    List * filenames;
     List * attrs_sorted;
     bool   use_mmap;
     bool   use_thread;
@@ -48,7 +99,7 @@ extern "C" void db721_GetForeignRelSize(PlannerInfo *root, RelOptInfo *baserel,
   fdw_private = (Db721FdwPlanState *) palloc0(sizeof(Db721FdwPlanState));
   get_table_options(foreigntableid, fdw_private);
   rte = root->simple_rte_array[baserel->relid];
-  rel = table_open(rte->relid, AccesShareLock);
+  rel = table_open(rte->relid, AccessShareLock);
   tupleDesc = RelationGetDescr(rel);
 
   filename_orig = fdw_private->filenames;

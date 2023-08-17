@@ -6,7 +6,8 @@
 
 extern "C"
 {
-#include "postres.h"
+#include "../../../../src/include/postgres.h"
+#include "utils/jsonb.h"
 };
 
 #define ERROR_STR_LEN 512

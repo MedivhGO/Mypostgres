@@ -10,6 +10,7 @@ extern "C"
 #include "utils/memutils.h"
 #include "utils/memdebug.h"
 #include "utils/timestamp.h"
+#include "limits.h"
 }
 
 char *

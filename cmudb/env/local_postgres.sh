@@ -21,7 +21,7 @@ cp ./cmudb/env/pgtune.auto.conf "${BIN_DIR}"/pgdata/postgresql.auto.conf
 
 cd ./cmudb/extensions/db721_fdw/
 make clean
-make install -j
+make install -j8
 make clean
 cd "${ROOT_DIR}"
 echo -e "\nshared_preload_libraries = 'db721_fdw'\n" >>"${BIN_DIR}"/pgdata/postgresql.auto.conf
