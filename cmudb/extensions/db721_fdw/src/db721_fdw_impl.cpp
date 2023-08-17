@@ -2,6 +2,7 @@
 // https://www.postgresql.org/docs/15/xfunc-c.html#EXTEND-CPP
 
 #include "dog.h"
+#include "assert.h"
 
 // clang-format off
 extern "C" {
@@ -11,11 +12,47 @@ extern "C" {
 }
 // clang-format on
 
+struct Db721FdwPlanState
+{
+    List * filename;
+    List * attrs_sorted;
+    bool   use_mmap;
+    bool   use_thread;
+    int32  max_open_files;
+    bool   files_in_orders;
+};
+
+static void
+get_table_options(Oid relid, Db721FdwPlanState* fdw_private)
+{
+    ForeignTable *table;
+    char *funcname = NULL;
+    char *funcarg = NULL;
+    fdw_private->use_mmap = false;
+    fdw_private->use_thread = false;
+    fdw_private->max_open_files = 0;
+    fdw_private->files_in_orders = false;
+    table = GetForeignTable(relid);
+}
+
 extern "C" void db721_GetForeignRelSize(PlannerInfo *root, RelOptInfo *baserel,
                                       Oid foreigntableid) {
-  // TODO(721): Write me!
-  Dog terrier("Terrier");
-  elog(LOG, "db721_GetForeignRelSize: %s", terrier.Bark().c_str());
+  Db721FdwPlanState *fdw_private;
+  RangeTblEntry *rte;
+  Relation rel;
+  TupleDesc tupleDesc;
+  List* filename_orig;
+  uint64  matched_rows = 0;
+  uint64  total_rows = 0;
+  fdw_private = (Db721FdwPlanState *) palloc0(sizeof(Db721FdwPlanState));
+  get_table_options(foreigntableid, fdw_private);
+  rte = root->simple_rte_array[baserel->relid];
+  rel = table_open(rte->relid, AccesShareLock);
+  tupleDesc = RelationGetDescr(rel);
+
+  filename_orig = fdw_private->filenames;
+  baserel->fdw_private = fdw_private;
+  baserel->tuples = total_rows;
 }
 
 extern "C" void db721_GetForeignPaths(PlannerInfo *root, RelOptInfo *baserel,
