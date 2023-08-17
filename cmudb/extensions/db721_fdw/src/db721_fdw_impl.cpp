@@ -3,6 +3,7 @@
 
 #include "dog.h"
 #include "assert.h"
+#include "common.hpp"
 
 // clang-format off
 extern "C" {
