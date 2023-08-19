@@ -66,75 +66,125 @@ extern "C" {
 
 struct Db721FdwPlanState
 {
-    List * filenames;
-    List * attrs_sorted;
-    bool   use_mmap;
-    bool   use_thread;
-    int32  max_open_files;
-    bool   files_in_orders;
+  List *filenames;
+  List *attrs_sorted;
+  bool use_mmap;
+  bool use_thread;
+  int32 max_open_files;
+  bool files_in_orders;
+  List *column_list;
 };
 
 static void
-get_table_options(Oid relid, Db721FdwPlanState* fdw_private)
+get_table_options(Oid relid, Db721FdwPlanState *fdw_private)
 {
-    ForeignTable *table;
-    char *funcname = NULL;
-    char *funcarg = NULL;
-    fdw_private->use_mmap = false;
-    fdw_private->use_thread = false;
-    fdw_private->max_open_files = 0;
-    fdw_private->files_in_orders = false;
-    table = GetForeignTable(relid);
+  ForeignTable *table = GetForeignTable(relid);
+  char *funcname = NULL;
+  char *funcarg = NULL;
+  fdw_private->use_mmap = false;
+  fdw_private->use_thread = false;
+  fdw_private->max_open_files = 0;
+  fdw_private->files_in_orders = false;
 }
 
+/**
+ * GetForeignRelSize should update the baserel rows and potentially also width. This will later be used by the optimizer.
+ * If not the correct values are set it could lead to potential miss optimization.
+ * This is also the place where we will handle the FDW options.
+ * In order to send information to the next step of the planing we will store the
+ * information inside ForeignScan node using the void *fdw_private that is provided by postgres.
+ * fdw_private will not be touched by anything else and is it is free to store anything of interest within it.
+ */
+
 extern "C" void db721_GetForeignRelSize(PlannerInfo *root, RelOptInfo *baserel,
-                                      Oid foreigntableid) {
+                                        Oid foreigntableid)
+{
+  elog(LOG, "begin db721_GetForeignRelSize foreigntable id is : %d", foreigntableid);
   Db721FdwPlanState *fdw_private;
   RangeTblEntry *rte;
   Relation rel;
   TupleDesc tupleDesc;
-  List* filename_orig;
-  uint64  matched_rows = 0;
-  uint64  total_rows = 0;
-  fdw_private = (Db721FdwPlanState *) palloc0(sizeof(Db721FdwPlanState));
+  List *filename_orig;
+  uint64 matched_rows = 0;
+  uint64 total_rows = 0;
+  fdw_private = (Db721FdwPlanState *)palloc0(sizeof(Db721FdwPlanState));
   get_table_options(foreigntableid, fdw_private);
   rte = root->simple_rte_array[baserel->relid];
   rel = table_open(rte->relid, AccessShareLock);
   tupleDesc = RelationGetDescr(rel);
-
   filename_orig = fdw_private->filenames;
   baserel->fdw_private = fdw_private;
   baserel->tuples = total_rows;
+  elog(LOG, "db721_GetForeignRelSize  %d", 10);
 }
 
+/**
+ * GetForeignPaths describes the paths to access the data.
+ * In our case there will only be one. Each paths should include a cost estimate.
+ * This will be used by the optimizer to find the optimal path. This is set on the baserel->pathlist.
+ */
+
 extern "C" void db721_GetForeignPaths(PlannerInfo *root, RelOptInfo *baserel,
-                                    Oid foreigntableid) {
+                                      Oid foreigntableid)
+{
   // TODO(721): Write me!
   Dog scout("Scout");
   elog(LOG, "db721_GetForeignPaths: %s", scout.Bark().c_str());
 }
 
+/**
+ * GetForeignPlan ir responsible for creating a ForeignScan * for the given ForeignPath *.
+ * As input the optimizer has selected the best access path(in our case there will only be one).
+ * Here we will also be able to pass information on to the next group of steps of the processing,
+ * [Begin, Iterate, End](# Begin, Iterate, End) where we will execute the plan, using the void *fdw_state.
+ * However void *fdw_state is a list so if the information from void *fdw_private should be propagate id needs to be reformated.
+ */
+
 extern "C" ForeignScan *
 db721_GetForeignPlan(PlannerInfo *root, RelOptInfo *baserel, Oid foreigntableid,
-                   ForeignPath *best_path, List *tlist, List *scan_clauses,
-                   Plan *outer_plan) {
+                     ForeignPath *best_path, List *tlist, List *scan_clauses,
+                     Plan *outer_plan)
+{
   // TODO(721): Write me!
   return nullptr;
 }
 
-extern "C" void db721_BeginForeignScan(ForeignScanState *node, int eflags) {
+/**
+ * BeginForeignScan should do any initialization that is needed before the scan.
+ * Information from the planing state can be accessed through ForeignScanState
+ * and the underlying ForeignScan which contains fdw_private which is provided through
+ * the previous planing and specifically GetForeignPlan.
+ * To pass information further the fdw_state on the ForeignScanState can be used.
+ */
+
+extern "C" void db721_BeginForeignScan(ForeignScanState *node, int eflags)
+{
   // TODO(721): Write me!
 }
 
-extern "C" TupleTableSlot *db721_IterateForeignScan(ForeignScanState *node) {
+/**
+ * IterateForeignScan should fetch one row(only),
+ * if all data is returned NULL should be returned marking the end. ScanTupleSlot should be used for the data return.
+ * Either a physical or virtual tuple should be returned. The rows returned must match the table definition of the FDW table.
+ */
+
+extern "C" TupleTableSlot *db721_IterateForeignScan(ForeignScanState *node)
+{
   // TODO(721): Write me!
   return nullptr;
 }
 
-extern "C" void db721_ReScanForeignScan(ForeignScanState *node) {
+extern "C" void db721_ReScanForeignScan(ForeignScanState *node)
+{
   // TODO(721): Write me!
 }
 
-extern "C" void db721_EndForeignScan(ForeignScanState *node) {
+/**
+ * EndForeignScan end the scan and release resources. It is normally not important to release palloc’d memory,
+ * but for example open files and connections to remote servers should be cleaned up.
+ */
+
+extern "C" void db721_EndForeignScan(ForeignScanState *node)
+{
   // TODO(721): Write me!
 }
