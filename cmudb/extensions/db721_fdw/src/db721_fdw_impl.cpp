@@ -5,6 +5,9 @@
 #include "assert.h"
 #include "common.hpp"
 
+#include <sys/stat.h>
+#include <unistd.h>
+
 // clang-format off
 extern "C" {
 #include "../../../../src/include/postgres.h"
@@ -66,19 +69,38 @@ extern "C" {
 
 struct Db721FdwPlanState
 {
-  List *filenames;
+  char *filename;
   List *attrs_sorted;
   bool use_mmap;
   bool use_thread;
   int32 max_open_files;
   bool files_in_orders;
   List *column_list;
+  BlockNumber pages;
+  double ntuples;
 };
+
+static void
+estimate_size(PlannerInfo *root, RelOptInfo *baserel,
+			  Db721FdwPlanState *fdw_private) {
+    struct stat stat_buf;
+    BlockNumber pages;
+    double ntuples;
+    double nrows;
+
+    if (stat(fdw_private->filename, &stat_buf) < 0) {
+      stat_buf.st_size = 10 * BLCKSZ;
+    }
+    baserel->rows = nrows;
+}
 
 static void
 get_table_options(Oid relid, Db721FdwPlanState *fdw_private)
 {
   ForeignTable *table = GetForeignTable(relid);
+  ForeignServer *server = GetForeignServer(table->serverid);
+  ForeignDataWrapper *wrapper = GetForeignDataWrapper(server->fdwid);
+
   char *funcname = NULL;
   char *funcarg = NULL;
   fdw_private->use_mmap = false;
@@ -104,7 +126,6 @@ extern "C" void db721_GetForeignRelSize(PlannerInfo *root, RelOptInfo *baserel,
   RangeTblEntry *rte;
   Relation rel;
   TupleDesc tupleDesc;
-  List *filename_orig;
   uint64 matched_rows = 0;
   uint64 total_rows = 0;
   fdw_private = (Db721FdwPlanState *)palloc0(sizeof(Db721FdwPlanState));
@@ -112,9 +133,9 @@ extern "C" void db721_GetForeignRelSize(PlannerInfo *root, RelOptInfo *baserel,
   rte = root->simple_rte_array[baserel->relid];
   rel = table_open(rte->relid, AccessShareLock);
   tupleDesc = RelationGetDescr(rel);
-  filename_orig = fdw_private->filenames;
   baserel->fdw_private = fdw_private;
   baserel->tuples = total_rows;
+  estimate_size(root,baserel, fdw_private);
   elog(LOG, "db721_GetForeignRelSize  %d", 10);
 }
 
