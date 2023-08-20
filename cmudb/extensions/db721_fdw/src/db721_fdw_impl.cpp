@@ -145,8 +145,16 @@ db721_GetForeignPlan(PlannerInfo *root, RelOptInfo *baserel, Oid foreigntableid,
                      ForeignPath *best_path, List *tlist, List *scan_clauses,
                      Plan *outer_plan)
 {
+  Index scan_relid = baserel->relid;
   // TODO(721): Write me!
-  return nullptr;
+  return make_foreignscan(tlist,
+                          scan_clauses,
+                          scan_relid,
+                          NIL,
+                          best_path->fdw_private,
+                          NIL,
+                          NIL,
+                          outer_plan);
 }
 
 /**
