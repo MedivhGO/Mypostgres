@@ -4,6 +4,7 @@
 #include "dog.h"
 #include "assert.h"
 #include "common.hpp"
+#include "myjson.h"
 
 #include <sys/stat.h>
 #include <unistd.h>
@@ -48,6 +49,7 @@ extern "C" {
 #include "utils/rel.h"
 #include "utils/timestamp.h"
 #include "utils/typcache.h"
+#include "utils/json.h"
 
 #if PG_VERSION_NUM < 120000
 #include "nodes/relation.h"
@@ -70,14 +72,8 @@ extern "C" {
 struct Db721FdwPlanState
 {
   char *filename;
-  List *attrs_sorted;
-  bool use_mmap;
-  bool use_thread;
-  int32 max_open_files;
-  bool files_in_orders;
-  List *column_list;
-  BlockNumber pages;
-  double ntuples;
+  char *tablename;
+  uint64 matched_rows;
 };
 
 static void
@@ -94,19 +90,33 @@ estimate_size(PlannerInfo *root, RelOptInfo *baserel,
     baserel->rows = nrows;
 }
 
+/**
+ * parser db721 file
+ * 
+*/
+static void
+parser_db721_file(const char* filename, TupleDesc tupleDesc, 
+                  uint64* matched_rows,
+                  uint64* total_rows) noexcept {
+  jsontuil::JSONDict file_meta;
+  return;
+}
+
 static void
 get_table_options(Oid relid, Db721FdwPlanState *fdw_private)
 {
   ForeignTable *table = GetForeignTable(relid);
-  ForeignServer *server = GetForeignServer(table->serverid);
-  ForeignDataWrapper *wrapper = GetForeignDataWrapper(server->fdwid);
-
-  char *funcname = NULL;
-  char *funcarg = NULL;
-  fdw_private->use_mmap = false;
-  fdw_private->use_thread = false;
-  fdw_private->max_open_files = 0;
-  fdw_private->files_in_orders = false;
+  ListCell     *lc;
+  foreach(lc, table->options) {
+    DefElem *def = (DefElem *) lfirst(lc);
+    if (strcmp(def->defname, "filename") == 0) {
+      fdw_private->filename = defGetString(def);
+    } else if (strcmp(def->defname, "tablename") == 0) {
+      fdw_private->tablename = defGetString(def);
+    } else {
+      elog(ERROR, "unknown option '%s'", def->defname);
+    }
+  }
 }
 
 /**
@@ -121,22 +131,19 @@ get_table_options(Oid relid, Db721FdwPlanState *fdw_private)
 extern "C" void db721_GetForeignRelSize(PlannerInfo *root, RelOptInfo *baserel,
                                         Oid foreigntableid)
 {
-  elog(LOG, "begin db721_GetForeignRelSize foreigntable id is : %d", foreigntableid);
   Db721FdwPlanState *fdw_private;
-  RangeTblEntry *rte;
-  Relation rel;
-  TupleDesc tupleDesc;
+  fdw_private = (Db721FdwPlanState *)palloc0(sizeof(Db721FdwPlanState));
   uint64 matched_rows = 0;
   uint64 total_rows = 0;
-  fdw_private = (Db721FdwPlanState *)palloc0(sizeof(Db721FdwPlanState));
   get_table_options(foreigntableid, fdw_private);
-  rte = root->simple_rte_array[baserel->relid];
-  rel = table_open(rte->relid, AccessShareLock);
-  tupleDesc = RelationGetDescr(rel);
+
+  TupleDesc       tupleDesc;
+
+  parser_db721_file(fdw_private->filename, tupleDesc,&matched_rows, &total_rows);
+
   baserel->fdw_private = fdw_private;
-  baserel->tuples = total_rows;
-  estimate_size(root,baserel, fdw_private);
-  elog(LOG, "db721_GetForeignRelSize  %d", 10);
+  baserel->tuples = total_rows; // set rows from db721 file
+  baserel->rows = fdw_private->matched_rows = matched_rows;   // set match rows from db721 file
 }
 
 /**
