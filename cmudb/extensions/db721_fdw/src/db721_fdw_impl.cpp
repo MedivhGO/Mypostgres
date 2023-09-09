@@ -199,22 +199,10 @@ parser_db721_file(std::string_view json, Db721FdwPlanState *fdw_private) noexcep
         fcbs.value_in_block = cur_stat["num"]->get<int>();
         // may be the value be recongnized int
         // so need to judge
-        if (cur_stat["max"]->is<int>())
-        {
-          fcbs.max = cur_stat["max"]->get<int>();
-        }
-        else
-        {
-          fcbs.max = cur_stat["max"]->get<float>();
-        }
-        if (cur_stat["min"]->is<int>())
-        {
-          fcbs.min = cur_stat["min"]->get<int>();
-        }
-        else
-        {
-          fcbs.min = cur_stat["max"]->get<float>();
-        }
+        fcbs.max = cur_stat["max"]->is<int>() ? cur_stat["max"]->get<int>() :
+                                                cur_stat["max"]->get<float>();
+        fcbs.min = cur_stat["min"]->is<int>() ? cur_stat["min"]->get<int>() :
+                                                cur_stat["min"]->get<float>();
         cd.float_block_stat.insert(make_pair(item.first, fcbs));
       }
       else if (cd.type_name == "int")
