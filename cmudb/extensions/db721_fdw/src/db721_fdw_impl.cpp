@@ -5,9 +5,12 @@
 #include "assert.h"
 #include "common.hpp"
 #include "myjson.h"
+#include "myfilereader.h"
 
 #include <sys/stat.h>
 #include <unistd.h>
+#include <iostream>
+
 
 // clang-format off
 extern "C" {
@@ -69,37 +72,93 @@ extern "C" {
 }
 // clang-format on
 
-struct Db721FdwPlanState
-{
-  char *filename;
-  char *tablename;
-  uint64 matched_rows;
+#define JSON_META_SIZE 4
+
+template <typename T>
+struct BlockStat {
+  int value_in_block;
+  T min;
+  T max;
+  int str_max_len = 0;
+  int str_min_len = 0;
 };
 
-static void
-estimate_size(PlannerInfo *root, RelOptInfo *baserel,
-			  Db721FdwPlanState *fdw_private) {
-    struct stat stat_buf;
-    BlockNumber pages;
-    double ntuples;
-    double nrows;
+using StringColumnBlockStat = BlockStat<std::string>;
+using IntColumnBlockStat = BlockStat<int>;
+using FloatColumnBlockStat = BlockStat<float>;
 
-    if (stat(fdw_private->filename, &stat_buf) < 0) {
-      stat_buf.st_size = 10 * BLCKSZ;
-    }
-    baserel->rows = nrows;
-}
+struct ColumnDesc {
+  std::string colum_name;
+  std::string type_name;
+  int num_blocks;
+  int start_offset;
+  std::unordered_map<std::string, StringColumnBlockStat>  str_block_stat;
+  std::unordered_map<std::string, IntColumnBlockStat>     int_block_stat;
+  std::unordered_map<std::string, FloatColumnBlockStat>   float_block_stat;
+};
+
+typedef struct Db721FdwPlanState {
+  std::string filename;
+  std::string tablename;
+  int         max_values_per_block;
+  std::vector<std::string> columns_list;
+  std::vector<ColumnDesc> columns_desc;
+} Db721FdwPlanState;
+
+// static void
+// estimate_size(PlannerInfo *root, RelOptInfo *baserel, Db721FdwPlanState *fdw_private) {
+//     struct stat stat_buf;
+//     if (stat(fdw_private->filename, &stat_buf) < 0) {
+//       stat_buf.st_size = 10 * BLCKSZ;
+//     }
+// }
 
 /**
  * parser db721 file
- * 
 */
 static void
-parser_db721_file(const char* filename, TupleDesc tupleDesc, 
-                  uint64* matched_rows,
-                  uint64* total_rows) noexcept {
-  jsontuil::JSONDict file_meta;
-  return;
+parser_db721_file(std::string_view json, Db721FdwPlanState *fdw_private) noexcept {
+  auto [obj, eaten] = myutil::parse(json);
+  myutil::JSONDict mymeta = obj.get<myutil::JSONDict>();
+  fdw_private -> max_values_per_block = mymeta["Max Values Per Block"]->get<int>();
+  myutil::JSONDict my_columns = mymeta["Columns"]->get<myutil::JSONDict>();
+  for (std::pair<std::string, std::shared_ptr<myutil::JSONObject>> one_column : my_columns) {
+    fdw_private->columns_list.push_back(one_column.first);
+    myutil::JSONDict column_desc = one_column.second->get<myutil::JSONDict>();
+    ColumnDesc cd;
+    cd.colum_name = one_column.first;
+    cd.type_name = column_desc["type"]->get<std::string>();
+    cd.start_offset = column_desc["start_offset"]->get<int>();
+    cd.num_blocks = column_desc["num_blocks"]->get<int>();
+    myutil::JSONDict myblockstat = column_desc["block_stats"]->get<myutil::JSONDict>();
+    for (std::pair<std::string, std::shared_ptr<myutil::JSONObject>> item : myblockstat) {
+      if (cd.type_name == "str") {
+        StringColumnBlockStat scbt;
+        myutil::JSONDict cur_stat = item.second->get<myutil::JSONDict>();
+        scbt.max = cur_stat["max"]->get<std::string>();
+        scbt.min = cur_stat["min"]->get<std::string>();
+        scbt.str_max_len = cur_stat["max_len"]->get<int>();
+        scbt.str_min_len = cur_stat["min_len"]->get<int>();
+        scbt.value_in_block = cur_stat["num"]->get<int>();
+        cd.str_block_stat.insert(make_pair(item.first, scbt));
+      } else if (cd.type_name == "float") {
+        FloatColumnBlockStat fcbs;
+        myutil::JSONDict cur_stat = item.second->get<myutil::JSONDict>();
+        fcbs.max = cur_stat["max"]->get<float>();
+        fcbs.min = cur_stat["min"]->get<float>();
+        fcbs.value_in_block = cur_stat["num"]->get<int>();
+        cd.float_block_stat.insert(make_pair(item.first, fcbs));
+      } else if (cd.type_name == "int") {
+        IntColumnBlockStat icbs;
+        myutil::JSONDict cur_stat = item.second->get<myutil::JSONDict>();
+        icbs.max = cur_stat["max"]->get<int>();
+        icbs.min = cur_stat["min"]->get<int>();
+        icbs.value_in_block = cur_stat["num"]->get<int>();
+        cd.int_block_stat.insert(make_pair(item.first, icbs));
+      }
+    }
+    fdw_private->columns_desc.push_back(cd);
+  }
 }
 
 static void
@@ -131,19 +190,21 @@ get_table_options(Oid relid, Db721FdwPlanState *fdw_private)
 extern "C" void db721_GetForeignRelSize(PlannerInfo *root, RelOptInfo *baserel,
                                         Oid foreigntableid)
 {
-  Db721FdwPlanState *fdw_private;
-  fdw_private = (Db721FdwPlanState *)palloc0(sizeof(Db721FdwPlanState));
-  uint64 matched_rows = 0;
+  Db721FdwPlanState fdw;
+  Db721FdwPlanState *fdw_private = &fdw;
   uint64 total_rows = 0;
   get_table_options(foreigntableid, fdw_private);
-
-  TupleDesc       tupleDesc;
-
-  parser_db721_file(fdw_private->filename, tupleDesc,&matched_rows, &total_rows);
-
+  elog(LOG, "db721 filepath is %s", fdw_private->filename.c_str());
+  myutil::FileReader openfile;
+  openfile.Open(fdw_private->filename);
+  uint32_t meta_size = openfile.Seek(-JSON_META_SIZE, std::ios_base::end).ReadUInt32();
+  size_t joson_begin = JSON_META_SIZE + meta_size;
+  std::string meta_json = openfile.Seek(-joson_begin, std::ios_base::end).ReadAsciiString(meta_size);
+  elog(LOG, "db721 file meta data json is  %s", meta_json.c_str());
+  parser_db721_file(meta_json, fdw_private);
+  openfile.Close();
   baserel->fdw_private = fdw_private;
-  baserel->tuples = total_rows; // set rows from db721 file
-  baserel->rows = fdw_private->matched_rows = matched_rows;   // set match rows from db721 file
+  baserel->tuples = total_rows;
 }
 
 /**
