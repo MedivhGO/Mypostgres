@@ -11,7 +11,6 @@
 #include <unistd.h>
 #include <iostream>
 
-
 // clang-format off
 extern "C" {
 #include "../../../../src/include/postgres.h"
@@ -75,7 +74,8 @@ extern "C" {
 #define JSON_META_SIZE 4
 
 template <typename T>
-struct BlockStat {
+struct BlockStat
+{
   int value_in_block;
   T min;
   T max;
@@ -87,42 +87,90 @@ using StringColumnBlockStat = BlockStat<std::string>;
 using IntColumnBlockStat = BlockStat<int>;
 using FloatColumnBlockStat = BlockStat<float>;
 
-struct ColumnDesc {
+struct ColumnDesc
+{
   std::string colum_name;
   std::string type_name;
   int num_blocks;
   int start_offset;
-  std::unordered_map<std::string, StringColumnBlockStat>  str_block_stat;
-  std::unordered_map<std::string, IntColumnBlockStat>     int_block_stat;
-  std::unordered_map<std::string, FloatColumnBlockStat>   float_block_stat;
+  std::unordered_map<std::string, StringColumnBlockStat> str_block_stat;
+  std::unordered_map<std::string, IntColumnBlockStat> int_block_stat;
+  std::unordered_map<std::string, FloatColumnBlockStat> float_block_stat;
 };
 
-typedef struct Db721FdwPlanState {
+typedef struct Db721FdwPlanState
+{
   std::string filename;
   std::string tablename;
-  int         max_values_per_block;
+  int max_values_per_block;
   std::vector<std::string> columns_list;
   std::vector<ColumnDesc> columns_desc;
 } Db721FdwPlanState;
 
-// static void
-// estimate_size(PlannerInfo *root, RelOptInfo *baserel, Db721FdwPlanState *fdw_private) {
-//     struct stat stat_buf;
-//     if (stat(fdw_private->filename, &stat_buf) < 0) {
-//       stat_buf.st_size = 10 * BLCKSZ;
-//     }
-// }
+class Db721FdwExecutionState
+{
+public:
+  Db721FdwExecutionState(){};
+  ~Db721FdwExecutionState()
+  {
+    if (reader_.HasOpen())
+    {
+      reader_.Close();
+    }
+  };
+
+  bool next(TupleTableSlot *slot)
+  {
+    for (int attr = 0; attr < slot->tts_tupleDescriptor->natts; attr++) {
+      slot->tts_values[attr] = read_primitive_type();
+    }
+    return true;
+  }
+
+  Datum read_primitive_type() {
+    Datum res;
+    uint32_t value = reader_.ReadUInt32();
+    res = UInt32GetDatum(value);
+    return res;
+  }
+
+  void rescan(void)
+  {
+    return;
+  }
+
+  void add_file(const std::string &file_name)
+  {
+    reader_.Open(file_name);
+  }
+
+private:
+  myutil::FileReader reader_;
+  TupleDesc tuple_desc_;
+};
+
+static void
+estimate_costs(PlannerInfo *root, RelOptInfo *baserel,
+               Db721FdwPlanState *fdw_private,
+               Cost *startup_cost, Cost *total_cost)
+{
+  *startup_cost = baserel->baserestrictcost.startup;
+  *total_cost = *startup_cost;
+  baserel->rows = 100;
+}
 
 /**
  * parser db721 file
-*/
+ */
 static void
-parser_db721_file(std::string_view json, Db721FdwPlanState *fdw_private) noexcept {
+parser_db721_file(std::string_view json, Db721FdwPlanState *fdw_private) noexcept
+{
   auto [obj, eaten] = myutil::parse(json);
   myutil::JSONDict mymeta = obj.get<myutil::JSONDict>();
-  fdw_private -> max_values_per_block = mymeta["Max Values Per Block"]->get<int>();
+  fdw_private->max_values_per_block = mymeta["Max Values Per Block"]->get<int>();
   myutil::JSONDict my_columns = mymeta["Columns"]->get<myutil::JSONDict>();
-  for (std::pair<std::string, std::shared_ptr<myutil::JSONObject>> one_column : my_columns) {
+  for (std::pair<std::string, std::shared_ptr<myutil::JSONObject>> one_column : my_columns)
+  {
     fdw_private->columns_list.push_back(one_column.first);
     myutil::JSONDict column_desc = one_column.second->get<myutil::JSONDict>();
     ColumnDesc cd;
@@ -131,8 +179,10 @@ parser_db721_file(std::string_view json, Db721FdwPlanState *fdw_private) noexcep
     cd.start_offset = column_desc["start_offset"]->get<int>();
     cd.num_blocks = column_desc["num_blocks"]->get<int>();
     myutil::JSONDict myblockstat = column_desc["block_stats"]->get<myutil::JSONDict>();
-    for (std::pair<std::string, std::shared_ptr<myutil::JSONObject>> item : myblockstat) {
-      if (cd.type_name == "str") {
+    for (std::pair<std::string, std::shared_ptr<myutil::JSONObject>> item : myblockstat)
+    {
+      if (cd.type_name == "str")
+      {
         StringColumnBlockStat scbt;
         myutil::JSONDict cur_stat = item.second->get<myutil::JSONDict>();
         scbt.max = cur_stat["max"]->get<std::string>();
@@ -141,24 +191,34 @@ parser_db721_file(std::string_view json, Db721FdwPlanState *fdw_private) noexcep
         scbt.str_min_len = cur_stat["min_len"]->get<int>();
         scbt.value_in_block = cur_stat["num"]->get<int>();
         cd.str_block_stat.insert(make_pair(item.first, scbt));
-      } else if (cd.type_name == "float") {
+      }
+      else if (cd.type_name == "float")
+      {
         FloatColumnBlockStat fcbs;
         myutil::JSONDict cur_stat = item.second->get<myutil::JSONDict>();
         fcbs.value_in_block = cur_stat["num"]->get<int>();
         // may be the value be recongnized int
         // so need to judge
-        if (cur_stat["max"]->is<int>()) {
+        if (cur_stat["max"]->is<int>())
+        {
           fcbs.max = cur_stat["max"]->get<int>();
-        } else {
+        }
+        else
+        {
           fcbs.max = cur_stat["max"]->get<float>();
         }
-        if (cur_stat["min"]->is<int>()) {
+        if (cur_stat["min"]->is<int>())
+        {
           fcbs.min = cur_stat["min"]->get<int>();
-        } else {
+        }
+        else
+        {
           fcbs.min = cur_stat["max"]->get<float>();
         }
         cd.float_block_stat.insert(make_pair(item.first, fcbs));
-      } else if (cd.type_name == "int") {
+      }
+      else if (cd.type_name == "int")
+      {
         IntColumnBlockStat icbs;
         myutil::JSONDict cur_stat = item.second->get<myutil::JSONDict>();
         icbs.max = cur_stat["max"]->get<int>();
@@ -175,14 +235,20 @@ static void
 get_table_options(Oid relid, Db721FdwPlanState *fdw_private)
 {
   ForeignTable *table = GetForeignTable(relid);
-  ListCell     *lc;
-  foreach(lc, table->options) {
-    DefElem *def = (DefElem *) lfirst(lc);
-    if (strcmp(def->defname, "filename") == 0) {
+  ListCell *lc;
+  foreach (lc, table->options)
+  {
+    DefElem *def = (DefElem *)lfirst(lc);
+    if (strcmp(def->defname, "filename") == 0)
+    {
       fdw_private->filename = defGetString(def);
-    } else if (strcmp(def->defname, "tablename") == 0) {
+    }
+    else if (strcmp(def->defname, "tablename") == 0)
+    {
       fdw_private->tablename = defGetString(def);
-    } else {
+    }
+    else
+    {
       elog(ERROR, "unknown option '%s'", def->defname);
     }
   }
@@ -200,8 +266,7 @@ get_table_options(Oid relid, Db721FdwPlanState *fdw_private)
 extern "C" void db721_GetForeignRelSize(PlannerInfo *root, RelOptInfo *baserel,
                                         Oid foreigntableid)
 {
-  Db721FdwPlanState fdw;
-  Db721FdwPlanState *fdw_private = &fdw;
+  Db721FdwPlanState *fdw_private = (Db721FdwPlanState *)palloc0(sizeof(Db721FdwPlanState));
   uint64 total_rows = 0;
   get_table_options(foreigntableid, fdw_private);
   myutil::FileReader openfile;
@@ -210,7 +275,6 @@ extern "C" void db721_GetForeignRelSize(PlannerInfo *root, RelOptInfo *baserel,
   size_t joson_begin = JSON_META_SIZE + meta_size;
   std::string meta_json = openfile.Seek(-joson_begin, std::ios_base::end).ReadAsciiString(meta_size);
   openfile.Close();
-  elog(LOG, "db721 file meta data json is  %s", meta_json.c_str());
   parser_db721_file(meta_json, fdw_private);
   baserel->fdw_private = fdw_private;
   baserel->tuples = total_rows;
@@ -225,9 +289,24 @@ extern "C" void db721_GetForeignRelSize(PlannerInfo *root, RelOptInfo *baserel,
 extern "C" void db721_GetForeignPaths(PlannerInfo *root, RelOptInfo *baserel,
                                       Oid foreigntableid)
 {
-  // TODO(721): Write me!
-  Dog scout("Scout");
-  elog(LOG, "db721_GetForeignPaths: %s", scout.Bark().c_str());
+  Db721FdwPlanState *fdw_private = (Db721FdwPlanState *)baserel->fdw_private;
+  Path *foreign_path;
+  Cost startup_cost;
+  Cost total_cost;
+
+  estimate_costs(root, baserel, fdw_private,
+                 &startup_cost, &total_cost);
+
+  foreign_path = (Path *)create_foreignscan_path(root, baserel,
+                                                 NULL, /* default pathtarget */
+                                                 baserel->rows,
+                                                 startup_cost,
+                                                 total_cost,
+                                                 NULL, /* no pathkeys */
+                                                 NULL, /* no outer rel either */
+                                                 NULL, /* no extra plan */
+                                                 (List *)fdw_private);
+  add_path(baserel, (Path *)foreign_path);
 }
 
 /**
@@ -244,7 +323,7 @@ db721_GetForeignPlan(PlannerInfo *root, RelOptInfo *baserel, Oid foreigntableid,
                      Plan *outer_plan)
 {
   Index scan_relid = baserel->relid;
-  // TODO(721): Write me!
+  scan_clauses = extract_actual_clauses(scan_clauses, false);
   return make_foreignscan(tlist,
                           scan_clauses,
                           scan_relid,
@@ -265,7 +344,11 @@ db721_GetForeignPlan(PlannerInfo *root, RelOptInfo *baserel, Oid foreigntableid,
 
 extern "C" void db721_BeginForeignScan(ForeignScanState *node, int eflags)
 {
-  // TODO(721): Write me!
+  ForeignScan *plan = (ForeignScan *)node->ss.ps.plan;
+  Db721FdwExecutionState *festate = new Db721FdwExecutionState();
+  Db721FdwPlanState *fdw_private = (Db721FdwPlanState *)plan->fdw_private;
+  festate->add_file(fdw_private->filename);
+  node->fdw_state = festate;
 }
 
 /**
@@ -276,13 +359,17 @@ extern "C" void db721_BeginForeignScan(ForeignScanState *node, int eflags)
 
 extern "C" TupleTableSlot *db721_IterateForeignScan(ForeignScanState *node)
 {
-  // TODO(721): Write me!
-  return nullptr;
+  Db721FdwExecutionState *festate = (Db721FdwExecutionState *)node->fdw_state;
+  TupleTableSlot *slot = node->ss.ss_ScanTupleSlot;
+  std::string error;
+  festate->next(slot);
+  return slot;
 }
 
 extern "C" void db721_ReScanForeignScan(ForeignScanState *node)
 {
-  // TODO(721): Write me!
+  Db721FdwExecutionState *festate = (Db721FdwExecutionState *)node->fdw_state;
+  festate->rescan();
 }
 
 /**
@@ -292,5 +379,8 @@ extern "C" void db721_ReScanForeignScan(ForeignScanState *node)
 
 extern "C" void db721_EndForeignScan(ForeignScanState *node)
 {
-  // TODO(721): Write me!
+  Db721FdwExecutionState *festate = (Db721FdwExecutionState *)node->fdw_state;
+  if (festate) {
+    delete festate;
+  }
 }
