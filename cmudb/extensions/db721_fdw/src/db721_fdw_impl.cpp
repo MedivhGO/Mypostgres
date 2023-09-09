@@ -144,9 +144,19 @@ parser_db721_file(std::string_view json, Db721FdwPlanState *fdw_private) noexcep
       } else if (cd.type_name == "float") {
         FloatColumnBlockStat fcbs;
         myutil::JSONDict cur_stat = item.second->get<myutil::JSONDict>();
-        fcbs.max = cur_stat["max"]->get<float>();
-        fcbs.min = cur_stat["min"]->get<float>();
         fcbs.value_in_block = cur_stat["num"]->get<int>();
+        // may be the value be recongnized int
+        // so need to judge
+        if (cur_stat["max"]->is<int>()) {
+          fcbs.max = cur_stat["max"]->get<int>();
+        } else {
+          fcbs.max = cur_stat["max"]->get<float>();
+        }
+        if (cur_stat["min"]->is<int>()) {
+          fcbs.min = cur_stat["min"]->get<int>();
+        } else {
+          fcbs.min = cur_stat["max"]->get<float>();
+        }
         cd.float_block_stat.insert(make_pair(item.first, fcbs));
       } else if (cd.type_name == "int") {
         IntColumnBlockStat icbs;
@@ -194,15 +204,14 @@ extern "C" void db721_GetForeignRelSize(PlannerInfo *root, RelOptInfo *baserel,
   Db721FdwPlanState *fdw_private = &fdw;
   uint64 total_rows = 0;
   get_table_options(foreigntableid, fdw_private);
-  elog(LOG, "db721 filepath is %s", fdw_private->filename.c_str());
   myutil::FileReader openfile;
   openfile.Open(fdw_private->filename);
   uint32_t meta_size = openfile.Seek(-JSON_META_SIZE, std::ios_base::end).ReadUInt32();
   size_t joson_begin = JSON_META_SIZE + meta_size;
   std::string meta_json = openfile.Seek(-joson_begin, std::ios_base::end).ReadAsciiString(meta_size);
+  openfile.Close();
   elog(LOG, "db721 file meta data json is  %s", meta_json.c_str());
   parser_db721_file(meta_json, fdw_private);
-  openfile.Close();
   baserel->fdw_private = fdw_private;
   baserel->tuples = total_rows;
 }
