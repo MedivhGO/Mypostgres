@@ -134,6 +134,30 @@ public:
     return res;
   }
 
+  Datum read_at_pos(int begin_offset, int num_blocks, int number_of_value, std::string type_name) {
+    Datum res;
+    int cur_pos = begin_offset;
+    while (number_of_value--) {
+      reader_.Seek(cur_pos, std::ios_base::beg);
+      if (type_name == "str") {
+        cur_pos+=32;
+        std::string values = reader_.ReadAsciiString(32);
+        elog(LOG, "'%s'", values.c_str());
+      } else if (type_name == "int") {
+        cur_pos+=4;
+        int32_t value;
+        reader_.Read4Bytes(reinterpret_cast<char*>(&value));
+        elog(LOG, "%d", value);
+      } else if (type_name == "float") {
+        float value;
+        reader_.Read4Bytes(reinterpret_cast<char*>(&value));
+        elog(LOG, "%f", value);
+        cur_pos +=4;
+      } 
+    }
+    return res;
+  }
+
   void rescan(void)
   {
     return;
@@ -336,6 +360,22 @@ extern "C" void db721_BeginForeignScan(ForeignScanState *node, int eflags)
   Db721FdwExecutionState *festate = new Db721FdwExecutionState();
   Db721FdwPlanState *fdw_private = (Db721FdwPlanState *)plan->fdw_private;
   festate->add_file(fdw_private->filename);
+  std::vector<ColumnDesc>& test_colum = fdw_private->columns_desc;
+  for(auto& item : test_colum) {
+    std::string column_name = item.colum_name;
+    int begin_offset = item.start_offset;
+    int number_of_blocks = item.num_blocks;
+    int value_int_block = 0;
+    if (item.type_name == "float") {
+      value_int_block = item.float_block_stat["0"].value_in_block;
+    } else if (item.type_name == "str") {
+      value_int_block = item.str_block_stat["0"].value_in_block;
+    } else if (item.type_name == "int") {
+      value_int_block = item.int_block_stat["0"].value_in_block;
+    }
+    festate->read_at_pos(begin_offset, number_of_blocks, value_int_block, item.type_name);
+  }
+  elog(LOG, "db721_BeginForeignScan");
   node->fdw_state = festate;
 }
 
@@ -351,11 +391,13 @@ extern "C" TupleTableSlot *db721_IterateForeignScan(ForeignScanState *node)
   TupleTableSlot *slot = node->ss.ss_ScanTupleSlot;
   std::string error;
   festate->next(slot);
+  elog(LOG, "db721_IterateForeignScan");
   return slot;
 }
 
 extern "C" void db721_ReScanForeignScan(ForeignScanState *node)
 {
+  elog(LOG, "db721_ReScanForeignScan");
   Db721FdwExecutionState *festate = (Db721FdwExecutionState *)node->fdw_state;
   festate->rescan();
 }
@@ -369,6 +411,7 @@ extern "C" void db721_EndForeignScan(ForeignScanState *node)
 {
   Db721FdwExecutionState *festate = (Db721FdwExecutionState *)node->fdw_state;
   if (festate) {
+    elog(LOG, "db721_EndForeignScan");
     delete festate;
   }
 }
