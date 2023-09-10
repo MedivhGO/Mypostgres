@@ -3,13 +3,12 @@
 
 #include "dog.h"
 #include "assert.h"
-#include "common.hpp"
+#include "common.h"
 #include "myjson.h"
 #include "myfilereader.h"
 
 #include <sys/stat.h>
 #include <unistd.h>
-#include <iostream>
 
 // clang-format off
 extern "C" {
@@ -71,42 +70,6 @@ extern "C" {
 }
 // clang-format on
 
-#define JSON_META_SIZE 4
-
-template <typename T>
-struct BlockStat
-{
-  int value_in_block;
-  T min;
-  T max;
-  int str_max_len = 0;
-  int str_min_len = 0;
-};
-
-using StringColumnBlockStat = BlockStat<std::string>;
-using IntColumnBlockStat = BlockStat<int>;
-using FloatColumnBlockStat = BlockStat<float>;
-
-struct ColumnDesc
-{
-  std::string colum_name;
-  std::string type_name;
-  int num_blocks;
-  int start_offset;
-  std::unordered_map<std::string, StringColumnBlockStat> str_block_stat;
-  std::unordered_map<std::string, IntColumnBlockStat> int_block_stat;
-  std::unordered_map<std::string, FloatColumnBlockStat> float_block_stat;
-};
-
-typedef struct Db721FdwPlanState
-{
-  std::string filename;
-  std::string tablename;
-  int max_values_per_block;
-  std::vector<std::string> columns_list;
-  std::vector<ColumnDesc> columns_desc;
-} Db721FdwPlanState;
-
 class Db721FdwExecutionState
 {
 public:
@@ -121,41 +84,7 @@ public:
 
   bool next(TupleTableSlot *slot)
   {
-    for (int attr = 0; attr < slot->tts_tupleDescriptor->natts; attr++) {
-      slot->tts_values[attr] = read_primitive_type();
-    }
     return true;
-  }
-
-  Datum read_primitive_type() {
-    Datum res;
-    uint32_t value = reader_.ReadUInt32();
-    res = UInt32GetDatum(value);
-    return res;
-  }
-
-  Datum read_at_pos(int begin_offset, int num_blocks, int number_of_value, std::string type_name) {
-    Datum res;
-    int cur_pos = begin_offset;
-    while (number_of_value--) {
-      reader_.Seek(cur_pos, std::ios_base::beg);
-      if (type_name == "str") {
-        cur_pos+=32;
-        std::string values = reader_.ReadAsciiString(32);
-        elog(LOG, "'%s'", values.c_str());
-      } else if (type_name == "int") {
-        cur_pos+=4;
-        int32_t value;
-        reader_.Read4Bytes(reinterpret_cast<char*>(&value));
-        elog(LOG, "%d", value);
-      } else if (type_name == "float") {
-        float value;
-        reader_.Read4Bytes(reinterpret_cast<char*>(&value));
-        elog(LOG, "%f", value);
-        cur_pos +=4;
-      } 
-    }
-    return res;
   }
 
   void rescan(void)
@@ -278,6 +207,7 @@ get_table_options(Oid relid, Db721FdwPlanState *fdw_private)
 extern "C" void db721_GetForeignRelSize(PlannerInfo *root, RelOptInfo *baserel,
                                         Oid foreigntableid)
 {
+  elog(LOG, "db721_GetForeignRelSize");
   Db721FdwPlanState *fdw_private = (Db721FdwPlanState *)palloc0(sizeof(Db721FdwPlanState));
   uint64 total_rows = 0;
   get_table_options(foreigntableid, fdw_private);
@@ -286,6 +216,7 @@ extern "C" void db721_GetForeignRelSize(PlannerInfo *root, RelOptInfo *baserel,
   uint32_t meta_size = openfile.Seek(-JSON_META_SIZE, std::ios_base::end).ReadUInt32();
   size_t joson_begin = JSON_META_SIZE + meta_size;
   std::string meta_json = openfile.Seek(-joson_begin, std::ios_base::end).ReadAsciiString(meta_size);
+  elog(LOG, "%s", meta_json.c_str());
   openfile.Close();
   parser_db721_file(meta_json, fdw_private);
   baserel->fdw_private = fdw_private;
@@ -301,6 +232,7 @@ extern "C" void db721_GetForeignRelSize(PlannerInfo *root, RelOptInfo *baserel,
 extern "C" void db721_GetForeignPaths(PlannerInfo *root, RelOptInfo *baserel,
                                       Oid foreigntableid)
 {
+  elog(LOG, "db721_GetForeignPaths");
   Db721FdwPlanState *fdw_private = (Db721FdwPlanState *)baserel->fdw_private;
   Path *foreign_path;
   Cost startup_cost;
@@ -334,6 +266,7 @@ db721_GetForeignPlan(PlannerInfo *root, RelOptInfo *baserel, Oid foreigntableid,
                      ForeignPath *best_path, List *tlist, List *scan_clauses,
                      Plan *outer_plan)
 {
+  elog(LOG, "db721_GetForeignPlan");
   Index scan_relid = baserel->relid;
   scan_clauses = extract_actual_clauses(scan_clauses, false);
   return make_foreignscan(tlist,
@@ -356,26 +289,11 @@ db721_GetForeignPlan(PlannerInfo *root, RelOptInfo *baserel, Oid foreigntableid,
 
 extern "C" void db721_BeginForeignScan(ForeignScanState *node, int eflags)
 {
+  elog(LOG, "db721_BeginForeignScan");
   ForeignScan *plan = (ForeignScan *)node->ss.ps.plan;
   Db721FdwExecutionState *festate = new Db721FdwExecutionState();
   Db721FdwPlanState *fdw_private = (Db721FdwPlanState *)plan->fdw_private;
   festate->add_file(fdw_private->filename);
-  std::vector<ColumnDesc>& test_colum = fdw_private->columns_desc;
-  for(auto& item : test_colum) {
-    std::string column_name = item.colum_name;
-    int begin_offset = item.start_offset;
-    int number_of_blocks = item.num_blocks;
-    int value_int_block = 0;
-    if (item.type_name == "float") {
-      value_int_block = item.float_block_stat["0"].value_in_block;
-    } else if (item.type_name == "str") {
-      value_int_block = item.str_block_stat["0"].value_in_block;
-    } else if (item.type_name == "int") {
-      value_int_block = item.int_block_stat["0"].value_in_block;
-    }
-    festate->read_at_pos(begin_offset, number_of_blocks, value_int_block, item.type_name);
-  }
-  elog(LOG, "db721_BeginForeignScan");
   node->fdw_state = festate;
 }
 
@@ -387,11 +305,10 @@ extern "C" void db721_BeginForeignScan(ForeignScanState *node, int eflags)
 
 extern "C" TupleTableSlot *db721_IterateForeignScan(ForeignScanState *node)
 {
+  elog(LOG, "db721_IterateForeignScan");
   Db721FdwExecutionState *festate = (Db721FdwExecutionState *)node->fdw_state;
   TupleTableSlot *slot = node->ss.ss_ScanTupleSlot;
-  std::string error;
   festate->next(slot);
-  elog(LOG, "db721_IterateForeignScan");
   return slot;
 }
 
@@ -409,9 +326,9 @@ extern "C" void db721_ReScanForeignScan(ForeignScanState *node)
 
 extern "C" void db721_EndForeignScan(ForeignScanState *node)
 {
+  elog(LOG, "db721_EndForeignScan");
   Db721FdwExecutionState *festate = (Db721FdwExecutionState *)node->fdw_state;
   if (festate) {
-    elog(LOG, "db721_EndForeignScan");
     delete festate;
   }
 }
