@@ -8,7 +8,7 @@ class FileReader {
  public:
   FileReader();
 
-  ~FileReader();
+  virtual ~FileReader();
 
   auto Open(const std::string &file_path) -> bool;
 

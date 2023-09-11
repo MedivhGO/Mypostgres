@@ -7,6 +7,7 @@
 #include <exception>
 #include <unordered_map>
 #include <vector>
+#include <variant>
 
 #include "myfilereader.h"
 
@@ -21,9 +22,6 @@ extern "C"
 #define JSON_META_SIZE 4
 
 using FileReader = myutil::FileReader;
-
-char *tolowercase(const char *input, char *output);
-int32 string_to_int32(const char *s);
 
 template <typename T>
 struct BlockStat
@@ -59,13 +57,40 @@ typedef struct Db721FdwPlanState
   std::vector<ColumnDesc> columns_desc;
 } Db721FdwPlanState;
 
+struct ColumnReader
+{
+  int start_offset;
+  int type_size;
+  int total_rows;
+  int cur_rows;
+  std::string type_name;
+};
+
 
 class DB721FileReader : public FileReader
 {
 public:
 
-  DB721FileReader();
-  ~DB721FileReader();
+  DB721FileReader(const std::string& file_path, std::vector<ColumnDesc> col_desc) {
+    file_path_ = file_path;
+    col_desc_ = col_desc;
+  }
+
+  ~DB721FileReader() {
+    close();
+  }
+
+  void open() {
+    Open(file_path_);
+    init_column_reader();
+  }
+
+  void close() {
+    if (HasOpen())
+    {
+      Close();
+    }
+  }
 
   bool next(TupleTableSlot* slot) {
     if (row_ > num_rows_ ) {
@@ -78,8 +103,32 @@ public:
 
   void fill_slot(TupleTableSlot* slot) {
     for (int attr = 0; attr < slot->tts_tupleDescriptor->natts; attr++) {
-      elog(LOG, "fill tuple %d",slot->tts_tableOid);
-      slot->tts_isnull[attr] = false;
+      if (attr == 0) {
+        slot->tts_isnull[attr] = false;;
+      }
+      slot->tts_values[attr] = read_at_icol(attr);
+    }
+  }
+
+  void init_column_reader() {
+    for (auto x : col_desc_) {
+      ColumnReader cr;
+      cr.start_offset = x.start_offset;
+      cr.cur_rows = 0;
+      if (x.type_name == "str") {
+        cr.type_size = 32;
+        cr.total_rows = 6;
+        cr.type_name = "str";
+      } else if (x.type_name == "float") {
+        cr.type_size = 4;
+        cr.total_rows = 6;
+        cr.type_name = "float";
+      } else if (x.type_name == "int") {
+        cr.type_size = 4;
+        cr.total_rows = 6;
+        cr.type_name = "int";
+      }
+      col_reader_.push_back(cr);
     }
   }
 
@@ -87,43 +136,66 @@ public:
     row_ = 0;
   }
 
-  Datum read_primitive_type() {
+  Datum read_at_icol(int it_col) {
     Datum res;
-    uint32_t value = this->ReadUInt32();
-    res = UInt32GetDatum(value);
+    ColumnReader& cur_reader = col_reader_[it_col];
+    std::string type_name = cur_reader.type_name;
+    int cur_offset = cur_reader.cur_rows * cur_reader.type_size;
+    Seek(cur_offset, std::ios_base::beg);
+    cur_reader.cur_rows++;
+    if (type_name == "str") {
+      char* values = reinterpret_cast<char*>(ReadUInt8Array(32));
+      elog(LOG, "'%s'", values);
+      res = PointerGetDatum(values);
+    } else if (type_name == "int") {
+      int32_t value;
+      Read4Bytes(reinterpret_cast<char*>(&value));
+      elog(LOG, "%d", value);
+      res = Int32GetDatum(value);
+    } else if (type_name == "float") {
+      float value;
+      Read4Bytes(reinterpret_cast<char*>(&value));
+      elog(LOG, "%f", value);
+      res = Float4GetDatum(value);
+    } 
     return res;
   }
-
-  Datum read_at_pos(int begin_offset, int num_blocks, int number_of_value, std::string type_name) {
-    Datum res;
-    int cur_pos = begin_offset;
-    while (number_of_value--) {
-      this->Seek(cur_pos, std::ios_base::beg);
-      if (type_name == "str") {
-        cur_pos+=32;
-        std::string values = this->ReadAsciiString(32);
-        elog(LOG, "'%s'", values.c_str());
-      } else if (type_name == "int") {
-        cur_pos+=4;
-        int32_t value;
-        this->Read4Bytes(reinterpret_cast<char*>(&value));
-        elog(LOG, "%d", value);
-      } else if (type_name == "float") {
-        float value;
-        this->Read4Bytes(reinterpret_cast<char*>(&value));
-        elog(LOG, "%f", value);
-        cur_pos +=4;
-      } 
-    }
-    return res;
-  }
-
-  void read_all_data();
 
 private:
-  uint32_t row_;                // cur_row
-  uint32_t num_rows_;           // total_rows
+  uint32_t row_ = 0;                    // cur_row
+  uint32_t num_rows_ = 5;               // total_rows
   std::vector<ColumnDesc> col_desc_;
+  std::string file_path_;               // file_path
+  std::vector<ColumnReader> col_reader_;
 };
 
+class Db721FdwExecutionState
+{
+public:
+  Db721FdwExecutionState(const std::string& file_path, std::vector<ColumnDesc> col_desc) :
+    reader_(file_path, col_desc) {}
+
+  ~Db721FdwExecutionState() {};
+
+  bool next(TupleTableSlot *slot)
+  {
+    if (reader_.next(slot)) {
+      ExecStoreVirtualTuple(slot);
+    }
+    return true;
+  }
+
+  void rescan(void)
+  {
+    reader_.rescan();
+  }
+
+  void open()
+  {
+    reader_.open();
+  }
+
+private:
+  DB721FileReader reader_;
+};
 #endif

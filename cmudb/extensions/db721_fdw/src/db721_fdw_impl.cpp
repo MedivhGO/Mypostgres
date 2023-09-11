@@ -69,39 +69,6 @@ extern "C" {
 
 }
 // clang-format on
-
-class Db721FdwExecutionState
-{
-public:
-  Db721FdwExecutionState(){};
-  ~Db721FdwExecutionState()
-  {
-    if (reader_.HasOpen())
-    {
-      reader_.Close();
-    }
-  };
-
-  bool next(TupleTableSlot *slot)
-  {
-    return true;
-  }
-
-  void rescan(void)
-  {
-    return;
-  }
-
-  void add_file(const std::string &file_name)
-  {
-    reader_.Open(file_name);
-  }
-
-private:
-  myutil::FileReader reader_;
-  TupleDesc tuple_desc_;
-};
-
 static void
 estimate_costs(PlannerInfo *root, RelOptInfo *baserel,
                Db721FdwPlanState *fdw_private,
@@ -291,10 +258,10 @@ extern "C" void db721_BeginForeignScan(ForeignScanState *node, int eflags)
 {
   elog(LOG, "db721_BeginForeignScan");
   ForeignScan *plan = (ForeignScan *)node->ss.ps.plan;
-  Db721FdwExecutionState *festate = new Db721FdwExecutionState();
   Db721FdwPlanState *fdw_private = (Db721FdwPlanState *)plan->fdw_private;
-  festate->add_file(fdw_private->filename);
+  Db721FdwExecutionState *festate = new Db721FdwExecutionState(fdw_private->filename, fdw_private->columns_desc);
   node->fdw_state = festate;
+  festate->open();
 }
 
 /**
@@ -308,6 +275,7 @@ extern "C" TupleTableSlot *db721_IterateForeignScan(ForeignScanState *node)
   elog(LOG, "db721_IterateForeignScan");
   Db721FdwExecutionState *festate = (Db721FdwExecutionState *)node->fdw_state;
   TupleTableSlot *slot = node->ss.ss_ScanTupleSlot;
+  ExecClearTuple(slot);
   festate->next(slot);
   return slot;
 }
