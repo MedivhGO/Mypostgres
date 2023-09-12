@@ -104,7 +104,8 @@ public:
   void fill_slot(TupleTableSlot* slot) {
     for (int attr = 0; attr < slot->tts_tupleDescriptor->natts; attr++) {
       if (attr == 0) {
-        slot->tts_isnull[attr] = false;;
+        slot->tts_isnull[attr] = true;
+        read_at_icol(attr);
       }
       slot->tts_values[attr] = read_at_icol(attr);
     }
@@ -140,13 +141,15 @@ public:
     Datum res;
     ColumnReader& cur_reader = col_reader_[it_col];
     std::string type_name = cur_reader.type_name;
-    int cur_offset = cur_reader.cur_rows * cur_reader.type_size;
+    int cur_offset = cur_reader.start_offset + cur_reader.cur_rows * cur_reader.type_size;
     Seek(cur_offset, std::ios_base::beg);
     cur_reader.cur_rows++;
     if (type_name == "str") {
-      char* values = reinterpret_cast<char*>(ReadUInt8Array(32));
-      elog(LOG, "'%s'", values);
-      res = PointerGetDatum(values);
+      std::string values = ReadAsciiString(32);
+      // char * ptr = (char*) palloc(32);
+      // memcpy(ptr, values.c_str(), 32);
+      // res = PointerGetDatum(ptr);
+      elog(LOG, "%s", values.c_str());
     } else if (type_name == "int") {
       int32_t value;
       Read4Bytes(reinterpret_cast<char*>(&value));
