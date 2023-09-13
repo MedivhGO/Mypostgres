@@ -6,6 +6,7 @@
 #include "common.h"
 #include "myjson.h"
 #include "myfilereader.h"
+#include "myexecstat.h"
 
 #include <sys/stat.h>
 #include <unistd.h>
