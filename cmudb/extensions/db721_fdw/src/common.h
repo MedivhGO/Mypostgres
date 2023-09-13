@@ -8,6 +8,8 @@
 #include <unordered_map>
 #include <vector>
 #include <variant>
+#include <list>
+#include <memory>
 
 #include "myfilereader.h"
 
@@ -16,10 +18,15 @@ extern "C"
 #include "../../../../src/include/postgres.h"
 #include "utils/jsonb.h"
 #include "executor/tuptable.h"
+#include "utils/memutils.h"
+#include "utils/memdebug.h"
+#include "access/htup_details.h"
+#include "utils/rel.h"
 };
 
 #define ERROR_STR_LEN 512
 #define JSON_META_SIZE 4
+#define SEGMENT_SIZE (1024 * 1024)
 
 using FileReader = myutil::FileReader;
 
@@ -66,34 +73,170 @@ struct ColumnReader
   std::string type_name;
 };
 
+void *
+exc_palloc(std::size_t size)
+{
+	/* duplicates MemoryContextAllocZero to avoid increased overhead */
+	void	   *ret;
+	MemoryContext context = CurrentMemoryContext;
+
+	AssertArg(MemoryContextIsValid(context));
+
+	if (!AllocSizeIsValid(size))
+		throw std::bad_alloc();
+
+	context->isReset = false;
+
+	ret = context->methods->alloc(context, size);
+	if (unlikely(ret == NULL))
+		throw std::bad_alloc();
+
+	VALGRIND_MEMPOOL_ALLOC(context, ret, size);
+
+	return ret;
+}
+
+class FastAllocator
+{
+private:
+  /*
+   * Special memory segment to speed up bytea/Text allocations.
+   */
+  MemoryContext segments_cxt;
+  char *segment_start_ptr;
+  char *segment_cur_ptr;
+  char *segment_last_ptr;
+  std::list<char *> garbage_segments;
+
+public:
+  FastAllocator(MemoryContext cxt)
+      : segments_cxt(cxt), segment_start_ptr(nullptr), segment_cur_ptr(nullptr),
+        segment_last_ptr(nullptr), garbage_segments()
+  {
+  }
+
+  ~FastAllocator()
+  {
+    this->recycle();
+  }
+
+  /*
+   * fast_alloc
+   *      Preallocate a big memory segment and distribute blocks from it. When
+   *      segment is exhausted it is added to garbage_segments list and freed
+   *      on the next executor's iteration. If requested size is bigger that
+   *      SEGMENT_SIZE then just palloc is used.
+   */
+  inline void *fast_alloc(long size)
+  {
+    void *ret;
+
+    Assert(size >= 0);
+
+    /* If allocation is bigger than segment then just palloc */
+    if (size > SEGMENT_SIZE)
+    {
+      MemoryContext oldcxt = MemoryContextSwitchTo(this->segments_cxt);
+      void *block = exc_palloc(size);
+      this->garbage_segments.push_back((char *)block);
+      MemoryContextSwitchTo(oldcxt);
+
+      return block;
+    }
+
+    size = MAXALIGN(size);
+
+    /* If there is not enough space in current segment create a new one */
+    if (this->segment_last_ptr - this->segment_cur_ptr < size)
+    {
+      MemoryContext oldcxt;
+
+      /*
+       * Recycle the last segment at the next iteration (if there
+       * was one)
+       */
+      if (this->segment_start_ptr)
+        this->garbage_segments.push_back(this->segment_start_ptr);
+
+      oldcxt = MemoryContextSwitchTo(this->segments_cxt);
+      this->segment_start_ptr = (char *)exc_palloc(SEGMENT_SIZE);
+      this->segment_cur_ptr = this->segment_start_ptr;
+      this->segment_last_ptr =
+          this->segment_start_ptr + SEGMENT_SIZE - 1;
+      MemoryContextSwitchTo(oldcxt);
+    }
+
+    ret = (void *)this->segment_cur_ptr;
+    this->segment_cur_ptr += size;
+
+    return ret;
+  }
+
+  void recycle(void)
+  {
+    /* recycle old segments if any */
+    if (!this->garbage_segments.empty())
+    {
+      bool error = false;
+
+      PG_TRY();
+      {
+        for (auto it : this->garbage_segments)
+          pfree(it);
+      }
+      PG_CATCH();
+      {
+        error = true;
+      }
+      PG_END_TRY();
+      if (error)
+        throw std::runtime_error("garbage segments recycle failed");
+
+      this->garbage_segments.clear();
+      elog(DEBUG1, "parquet_fdw: garbage segments recycled");
+    }
+  }
+
+  MemoryContext context()
+  {
+    return segments_cxt;
+  }
+};
 
 class DB721FileReader : public FileReader
 {
 public:
-
-  DB721FileReader(const std::string& file_path, std::vector<ColumnDesc> col_desc) {
+  DB721FileReader(const std::string &file_path,
+                  std::vector<ColumnDesc> col_desc,
+                  MemoryContext cxt) : allocator_(new FastAllocator(cxt))
+  {
     file_path_ = file_path;
     col_desc_ = col_desc;
   }
 
-  ~DB721FileReader() {
+  ~DB721FileReader()
+  {
     close();
   }
 
-  void open() {
+  void open()
+  {
     Open(file_path_);
     init_column_reader();
   }
 
-  void close() {
+  void close()
+  {
     if (HasOpen())
     {
       Close();
     }
   }
 
-  bool next(TupleTableSlot* slot) {
-    if (row_ > num_rows_ ) {
+  bool next(TupleTableSlot *slot)
+  {
+    if (row_ > num_rows_)
+    {
       return false;
     }
     fill_slot(slot);
@@ -101,88 +244,112 @@ public:
     return true;
   }
 
-  void fill_slot(TupleTableSlot* slot) {
-    for (int attr = 0; attr < slot->tts_tupleDescriptor->natts; attr++) {
-      if (attr == 0) {
-        slot->tts_isnull[attr] = true;
-        read_at_icol(attr);
-      }
-      slot->tts_values[attr] = read_at_icol(attr);
+  void fill_slot(TupleTableSlot *slot)
+  {
+    Form_pg_attribute attr_int;
+    for (int attr = 0; attr < slot->tts_tupleDescriptor->natts; attr++)
+    {
+      attr_int = TupleDescAttr(slot->tts_tupleDescriptor, attr);
+      std::string columnName(NameStr(attr_int->attname));
+      slot->tts_values[attr] = read_at_icol(columnName);
     }
   }
 
-  void init_column_reader() {
-    for (auto x : col_desc_) {
+  virtual auto ReadUInt8Array(size_t count) -> uint8_t* override {
+    uint8_t* data = (uint8_t*) allocator_->fast_alloc(count);
+    for (size_t x = 0; x < count; x++) {
+      uint8_t u = ReadUInt8();
+      data[x] = u;
+    }
+    return data;
+  }
+
+  void init_column_reader()
+  {
+    for (auto x : col_desc_)
+    {
       ColumnReader cr;
       cr.start_offset = x.start_offset;
       cr.cur_rows = 0;
-      if (x.type_name == "str") {
+      if (x.type_name == "str")
+      {
         cr.type_size = 32;
         cr.total_rows = 6;
         cr.type_name = "str";
-      } else if (x.type_name == "float") {
+      }
+      else if (x.type_name == "float")
+      {
         cr.type_size = 4;
         cr.total_rows = 6;
         cr.type_name = "float";
-      } else if (x.type_name == "int") {
+      }
+      else if (x.type_name == "int")
+      {
         cr.type_size = 4;
         cr.total_rows = 6;
         cr.type_name = "int";
       }
-      col_reader_.push_back(cr);
+      col_reader_.insert(make_pair(x.colum_name, cr));
     }
   }
 
-  void rescan() {
+  void rescan()
+  {
     row_ = 0;
   }
 
-  Datum read_at_icol(int it_col) {
+  Datum read_at_icol(std::string col_name)
+  {
     Datum res;
-    ColumnReader& cur_reader = col_reader_[it_col];
+    ColumnReader &cur_reader = col_reader_[col_name];
     std::string type_name = cur_reader.type_name;
     int cur_offset = cur_reader.start_offset + cur_reader.cur_rows * cur_reader.type_size;
     Seek(cur_offset, std::ios_base::beg);
     cur_reader.cur_rows++;
-    if (type_name == "str") {
-      std::string values = ReadAsciiString(32);
-      // char * ptr = (char*) palloc(32);
-      // memcpy(ptr, values.c_str(), 32);
-      // res = PointerGetDatum(ptr);
-      elog(LOG, "%s", values.c_str());
-    } else if (type_name == "int") {
-      int32_t value;
-      Read4Bytes(reinterpret_cast<char*>(&value));
-      elog(LOG, "%d", value);
-      res = Int32GetDatum(value);
-    } else if (type_name == "float") {
-      float value;
-      Read4Bytes(reinterpret_cast<char*>(&value));
-      elog(LOG, "%f", value);
-      res = Float4GetDatum(value);
-    } 
+    if (type_name == "str")
+    {
+      uint8_t* data = ReadUInt8Array(32);
+      std::string cur_str = std::string(reinterpret_cast<char*>(data));
+      elog(LOG, "cur str is : %s", cur_str.c_str());
+      res = CStringGetDatum(reinterpret_cast<char*>(data));
+    }
+    else if (type_name == "int")
+    {
+      void* four_data = allocator_->fast_alloc(4);
+      Read4Bytes(reinterpret_cast<char *>(four_data));
+      res = Int32GetDatum(*reinterpret_cast<int32_t*>(four_data));
+    }
+    else if (type_name == "float")
+    {
+      void* four_data = allocator_->fast_alloc(4);
+      Read4Bytes(reinterpret_cast<char *>(four_data));
+      res = Float4GetDatum(*reinterpret_cast<float4*>(four_data));
+    }
     return res;
   }
 
 private:
-  uint32_t row_ = 0;                    // cur_row
-  uint32_t num_rows_ = 5;               // total_rows
+  uint32_t row_ = 0;      // cur_row
+  uint32_t num_rows_ = 5; // total_rows
   std::vector<ColumnDesc> col_desc_;
-  std::string file_path_;               // file_path
-  std::vector<ColumnReader> col_reader_;
+  std::string file_path_; // file_path
+  std::unordered_map<std::string, ColumnReader> col_reader_;
+  std::unique_ptr<FastAllocator>  allocator_;
 };
 
 class Db721FdwExecutionState
 {
 public:
-  Db721FdwExecutionState(const std::string& file_path, std::vector<ColumnDesc> col_desc) :
-    reader_(file_path, col_desc) {}
+  Db721FdwExecutionState(const std::string &file_path,
+                         std::vector<ColumnDesc> col_desc,
+                         MemoryContext cxt) : cxt_(cxt), reader_(file_path, col_desc, cxt_) {}
 
-  ~Db721FdwExecutionState() {};
+  ~Db721FdwExecutionState(){};
 
   bool next(TupleTableSlot *slot)
   {
-    if (reader_.next(slot)) {
+    if (reader_.next(slot))
+    {
       ExecStoreVirtualTuple(slot);
     }
     return true;
@@ -199,6 +366,7 @@ public:
   }
 
 private:
+  MemoryContext cxt_;
   DB721FileReader reader_;
 };
 #endif

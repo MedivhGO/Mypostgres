@@ -79,6 +79,15 @@ estimate_costs(PlannerInfo *root, RelOptInfo *baserel,
   baserel->rows = 100;
 }
 
+static void
+destory_db721_state(void *arg)
+{
+  Db721FdwExecutionState* festate = (Db721FdwExecutionState*) arg;
+  if (festate) {
+    delete festate;
+  }
+}
+
 /**
  * parser db721 file
  */
@@ -257,11 +266,21 @@ db721_GetForeignPlan(PlannerInfo *root, RelOptInfo *baserel, Oid foreigntableid,
 extern "C" void db721_BeginForeignScan(ForeignScanState *node, int eflags)
 {
   elog(LOG, "db721_BeginForeignScan");
+  MemoryContextCallback      *callback;
   ForeignScan *plan = (ForeignScan *)node->ss.ps.plan;
+  EState      *estate = node->ss.ps.state;
+  MemoryContext reader_cxt;
+  MemoryContext cxt = estate->es_query_cxt;
+  reader_cxt = AllocSetContextCreate(cxt, "db721_fdw tuple data", ALLOCSET_DEFAULT_SIZES);
   Db721FdwPlanState *fdw_private = (Db721FdwPlanState *)plan->fdw_private;
-  Db721FdwExecutionState *festate = new Db721FdwExecutionState(fdw_private->filename, fdw_private->columns_desc);
-  node->fdw_state = festate;
+  Db721FdwExecutionState *festate = new Db721FdwExecutionState(fdw_private->filename, fdw_private->columns_desc, reader_cxt);
   festate->open();
+
+  callback = (MemoryContextCallback *) palloc(sizeof(MemoryContextCallback));
+  callback->func = destory_db721_state;
+  callback->arg = (void* )festate;
+  MemoryContextRegisterResetCallback(reader_cxt, callback);
+  node->fdw_state = festate;
 }
 
 /**
@@ -274,9 +293,17 @@ extern "C" TupleTableSlot *db721_IterateForeignScan(ForeignScanState *node)
 {
   elog(LOG, "db721_IterateForeignScan");
   Db721FdwExecutionState *festate = (Db721FdwExecutionState *)node->fdw_state;
+  std::string  error;
   TupleTableSlot *slot = node->ss.ss_ScanTupleSlot;
   ExecClearTuple(slot);
-  festate->next(slot);
+  try {
+    festate->next(slot);
+  } catch(std::exception &e) {
+    error = e.what();
+  }
+  if (!error.empty()) {
+    elog(ERROR, "db721_fdw: %s", error.c_str());
+  }
   return slot;
 }
 
@@ -295,8 +322,4 @@ extern "C" void db721_ReScanForeignScan(ForeignScanState *node)
 extern "C" void db721_EndForeignScan(ForeignScanState *node)
 {
   elog(LOG, "db721_EndForeignScan");
-  Db721FdwExecutionState *festate = (Db721FdwExecutionState *)node->fdw_state;
-  if (festate) {
-    delete festate;
-  }
 }

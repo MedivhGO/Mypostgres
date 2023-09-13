@@ -26,40 +26,40 @@ class FileReader {
 
   auto Close() -> void;
 
-  auto Read4Bytes(char* dst) -> void {
+  virtual auto Read4Bytes(char* dst) -> void {
     fin_.read(dst, 4);
   }
 
-  auto Read4BytesBE(char* dst) -> void {
+  virtual auto Read4BytesBE(char* dst) -> void {
     this->fin_.read(dst + 3, 1);
     this->fin_.read(dst + 2, 1);
     this->fin_.read(dst + 1, 1);
     this->fin_.read(dst, 1);
   }
 
-  auto Read1Bytes(char* dst) -> void {
+  virtual auto Read1Bytes(char* dst) -> void {
     this->fin_.read(dst, 1);
   }
 
-  auto ReadUInt8() -> uint8_t {
+  virtual auto ReadUInt8() -> uint8_t {
     uint8_t data;
     Read1Bytes(reinterpret_cast<char*>(&data));
     return data;
   }
 
-  auto ReadUInt32() -> uint32_t {
+  virtual auto ReadUInt32() -> uint32_t {
     uint32_t data;
     Read4Bytes(reinterpret_cast<char*>(&data));
     return data;
   }
 
-  auto ReadUInt32BE() -> uint32_t {
+  virtual auto ReadUInt32BE() -> uint32_t {
     uint32_t data;
     Read4BytesBE(reinterpret_cast<char*>(&data));
     return data;
   }
 
-  auto ReadUInt8Array(size_t count) {
+  virtual auto ReadUInt8Array(size_t count) -> uint8_t* {
     uint8_t* data = new uint8_t[count];
     for (size_t x = 0; x < count; x++) {
       data[x] = ReadUInt8();
@@ -67,7 +67,7 @@ class FileReader {
     return data;
   }
 
-  auto ReadAsciiString(size_t len) -> std::string {
+  virtual auto ReadAsciiString(size_t len) -> std::string {
     char* buffer = (char*)ReadUInt8Array(len);
     std::string data = std::string(buffer, len);
     delete[] buffer;
