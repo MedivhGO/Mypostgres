@@ -269,13 +269,17 @@ class Db721Serializer:
 def main():
     scale_factor = 1
     next_chicken_id = 1
+    next_mychicken_id = 1
     seed = 15721
     rand = random.Random(seed)
     chickens = []
+    my_chickens = []
     db721_file_chickens = "data-chickens.db721"
     db721_file_farms = "data-farms.db721"
+    db721_file_mytest = "my-test.db721"
     csv_file_chickens = "data-chickens.csv"
     csv_file_farms = "data-farms.csv"
+    csv_file_mytest = "my-test.csv"
 
     def generate_chickens(num_chickens: int, farms: list[ChickenFarm]):
         nonlocal next_chicken_id
@@ -284,6 +288,14 @@ def main():
             chicken = farm.generate_chicken(next_chicken_id, seed + next_chicken_id)
             chickens.append(chicken)
             next_chicken_id += 1
+
+    def generate_mychickens(num_chickens: int, farms: list[ChickenFarm]):
+        nonlocal next_mychicken_id
+        for i in range(num_chickens):
+            farm = rand.choice(farms)
+            my_chicken = farm.generate_chicken(next_mychicken_id, seed + next_mychicken_id)
+            my_chickens.append(my_chicken)
+            next_mychicken_id += 1
 
     # Define a few different types of farms.
     incubator_1 = ChickenFarm("Incubator", max_age_weeks=2)
@@ -299,6 +311,11 @@ def main():
     generate_chickens(30000 * scale_factor, [layer_1, layer_2])
     generate_chickens(30000 * scale_factor, [broiler_1, broiler_2, broiler_3, layer_1])
     generate_chickens(10000 * scale_factor, [incubator_1])
+
+    generate_mychickens(500000 * scale_factor, [broiler_3])
+    generate_mychickens(300000 * scale_factor, [layer_1, layer_2])
+    generate_mychickens(300000 * scale_factor, [broiler_1, broiler_2, broiler_3, layer_1])
+    generate_mychickens(100000 * scale_factor, [incubator_1])
 
     with open(db721_file_farms, "wb") as f:
         serializer = Db721Serializer("Farm", f)
@@ -324,6 +341,19 @@ def main():
         serializer.finalize()
         print(f"Wrote {f.tell()} bytes to '{db721_file_farms}' (header: {f.tell() - pre_header_tell} bytes).")
 
+    with open(db721_file_mytest, "wb") as f:
+        serializer = Db721Serializer("MyChicken", f)
+        serializer.write_col("identifier", "int", [chicken.identifier for chicken in my_chickens])
+        serializer.write_col("farm_name", "str", [chicken.farm_name for chicken in my_chickens])
+        serializer.write_col("weight_model", "str", [chicken.weight_model for chicken in my_chickens])
+        serializer.write_col("sex", "str", [chicken.sex for chicken in my_chickens])
+        serializer.write_col("age_weeks", "float", [chicken.age_weeks for chicken in my_chickens])
+        serializer.write_col("weight_g", "float", [chicken.weight_grams for chicken in my_chickens])
+        serializer.write_col("notes", "str", [chicken.notes for chicken in my_chickens])
+        pre_header_tell = f.tell()
+        serializer.finalize()
+        print(f"Wrote {f.tell()} bytes to '{db721_file_farms}' (header: {f.tell() - pre_header_tell} bytes).")
+
     with open(csv_file_farms, "w", newline="") as f:
         writer = csv.writer(f)
         row = ["Farm Name", "Min Age Weeks", "Max Age Weeks"]
@@ -337,6 +367,16 @@ def main():
         row = ["Identifier", "Farm Name", "Weight Model", "Sex", "Age (weeks)", "Weight (g)", "Notes"]
         writer.writerow(row)
         for chicken in chickens:
+            row = [chicken.identifier, chicken.farm_name, chicken.weight_model, chicken.sex, chicken.age_weeks,
+                   chicken.weight_grams, chicken.notes]
+            writer.writerow(row)
+        print(f"Wrote {f.tell()} bytes to '{csv_file_chickens}'.")
+
+    with open(csv_file_mytest, 'w', newline="") as f:
+        writer = csv.writer(f)
+        row = ["Identifier", "Farm Name", "Weight Model", "Sex", "Age (weeks)", "Weight (g)", "Notes"]
+        writer.writerow(row)
+        for chicken in my_chickens:
             row = [chicken.identifier, chicken.farm_name, chicken.weight_model, chicken.sex, chicken.age_weeks,
                    chicken.weight_grams, chicken.notes]
             writer.writerow(row)

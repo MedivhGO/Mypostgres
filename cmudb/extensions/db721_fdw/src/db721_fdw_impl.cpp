@@ -184,7 +184,6 @@ get_table_options(Oid relid, Db721FdwPlanState *fdw_private)
 extern "C" void db721_GetForeignRelSize(PlannerInfo *root, RelOptInfo *baserel,
                                         Oid foreigntableid)
 {
-  elog(LOG, "db721_GetForeignRelSize");
   Db721FdwPlanState *fdw_private = (Db721FdwPlanState *)palloc0(sizeof(Db721FdwPlanState));
   uint64 total_rows = 0;
   get_table_options(foreigntableid, fdw_private);
@@ -209,7 +208,6 @@ extern "C" void db721_GetForeignRelSize(PlannerInfo *root, RelOptInfo *baserel,
 extern "C" void db721_GetForeignPaths(PlannerInfo *root, RelOptInfo *baserel,
                                       Oid foreigntableid)
 {
-  elog(LOG, "db721_GetForeignPaths");
   Db721FdwPlanState *fdw_private = (Db721FdwPlanState *)baserel->fdw_private;
   Path *foreign_path;
   Cost startup_cost;
@@ -243,7 +241,6 @@ db721_GetForeignPlan(PlannerInfo *root, RelOptInfo *baserel, Oid foreigntableid,
                      ForeignPath *best_path, List *tlist, List *scan_clauses,
                      Plan *outer_plan)
 {
-  elog(LOG, "db721_GetForeignPlan");
   Index scan_relid = baserel->relid;
   scan_clauses = extract_actual_clauses(scan_clauses, false);
   return make_foreignscan(tlist,
@@ -266,7 +263,6 @@ db721_GetForeignPlan(PlannerInfo *root, RelOptInfo *baserel, Oid foreigntableid,
 
 extern "C" void db721_BeginForeignScan(ForeignScanState *node, int eflags)
 {
-  elog(LOG, "db721_BeginForeignScan");
   MemoryContextCallback      *callback;
   ForeignScan *plan = (ForeignScan *)node->ss.ps.plan;
   EState      *estate = node->ss.ps.state;
@@ -292,7 +288,6 @@ extern "C" void db721_BeginForeignScan(ForeignScanState *node, int eflags)
 
 extern "C" TupleTableSlot *db721_IterateForeignScan(ForeignScanState *node)
 {
-  elog(LOG, "db721_IterateForeignScan");
   Db721FdwExecutionState *festate = (Db721FdwExecutionState *)node->fdw_state;
   std::string  error;
   TupleTableSlot *slot = node->ss.ss_ScanTupleSlot;
@@ -310,7 +305,6 @@ extern "C" TupleTableSlot *db721_IterateForeignScan(ForeignScanState *node)
 
 extern "C" void db721_ReScanForeignScan(ForeignScanState *node)
 {
-  elog(LOG, "db721_ReScanForeignScan");
   Db721FdwExecutionState *festate = (Db721FdwExecutionState *)node->fdw_state;
   festate->rescan();
 }
@@ -322,5 +316,5 @@ extern "C" void db721_ReScanForeignScan(ForeignScanState *node)
 
 extern "C" void db721_EndForeignScan(ForeignScanState *node)
 {
-  elog(LOG, "db721_EndForeignScan");
+
 }

@@ -17,8 +17,20 @@ CREATE TABLE IF NOT EXISTS chicken
     notes           varchar
 );
 
-\COPY farm FROM './data-farms.csv' CSV HEADER;
-\COPY chicken FROM './data-chickens.csv' CSV HEADER;
+CREATE TABLE IF NOT EXISTS mychicken
+(
+    identifier      integer,
+    farm_name       varchar,
+    weight_model    varchar,
+    sex             varchar,
+    age_weeks       real,
+    weight_g        real,
+    notes           varchar
+);
+
+\COPY farm FROM '/home/lee/Mypostgres/cmudb/extensions/db721_fdw/data-farms.csv' CSV HEADER;
+\COPY chicken FROM '/home/lee/Mypostgres/cmudb/extensions/db721_fdw/data-chickens.csv' CSV HEADER;
+\COPY mychicken FROM '/home/lee/Mypostgres/cmudb/extensions/db721_fdw/my-test.csv' CSV HEADER;
 
 CREATE EXTENSION IF NOT EXISTS db721_fdw;
 CREATE SERVER IF NOT EXISTS db721_server FOREIGN DATA WRAPPER db721_fdw;
@@ -45,4 +57,17 @@ CREATE FOREIGN TABLE IF NOT EXISTS db721_chicken (
 (
     filename '/home/lee/Mypostgres/cmudb/extensions/db721_fdw/data-chickens.db721',
     tablename 'Chicken'
+);
+CREATE FOREIGN TABLE IF NOT EXISTS db721_mychicken (
+    identifier      integer,
+    farm_name       varchar,
+    weight_model    varchar,
+    sex             varchar,
+    age_weeks       real,
+    weight_g        real,
+    notes           varchar
+) SERVER db721_server OPTIONS
+(
+    filename '/home/lee/Mypostgres/cmudb/extensions/db721_fdw/my-test.db721',
+    tablename 'mychicken'
 );
