@@ -33,6 +33,7 @@ extern "C" {
 #include "nodes/execnodes.h"
 #include "nodes/nodeFuncs.h"
 #include "nodes/makefuncs.h"
+#include "nodes/pg_list.h"
 #include "optimizer/cost.h"
 #include "optimizer/pathnode.h"
 #include "optimizer/paths.h"
@@ -52,6 +53,10 @@ extern "C" {
 #include "utils/timestamp.h"
 #include "utils/typcache.h"
 #include "utils/json.h"
+#include "executor/executor.h"
+#include "nodes/print.h"
+#include "catalog/pg_type.h"
+#include "utils/fmgrprotos.h"
 
 #if PG_VERSION_NUM < 120000
 #include "nodes/relation.h"
@@ -80,11 +85,98 @@ estimate_costs(PlannerInfo *root, RelOptInfo *baserel,
   baserel->rows = 100;
 }
 
+static void 
+print_op_expr(OpExpr *opexpr)
+{
+    /* 获取运算符的名称和左右操作数 */
+    Oid operatorId = opexpr->opno;
+    Oid leftTypeId, rightTypeId;
+    char *operatorName = get_opname(operatorId);
+    Node *leftArg, *rightArg;
+    leftArg = (Node *)linitial(opexpr->args);
+    rightArg = (Node *)lsecond(opexpr->args);
+
+    /* 获取左右操作数的类型 */
+    leftTypeId = exprType(leftArg);
+    rightTypeId = exprType(rightArg);
+
+    /* 使用 elog 函数将 OpExpr 的内容打印出来 */
+    elog(LOG, "OpExpr: %s (%u), leftArg: %s (%u), rightArg: %s (%u)",
+         operatorName, operatorId,
+         format_type_be(leftTypeId), leftTypeId,
+         format_type_be(rightTypeId), rightTypeId);
+}
+
+static void
+set_filter(List *scan_clauses, Db721Filter &filter)
+{
+  ListCell *lc;
+
+  foreach (lc, scan_clauses)
+  {
+    elog(LOG, "where cluase iterate one");
+    Expr *clause = (Expr *)lfirst(lc);
+    OpExpr *expr;
+    Expr *left, *right;
+    Const *c;
+    Var *v;
+    Oid opno = InvalidOid;
+
+    if (IsA(clause, RestrictInfo))
+      clause = ((RestrictInfo *)clause)->clause;
+
+    if (IsA(clause, OpExpr))
+    {
+      expr = (OpExpr *)clause;
+      print_op_expr(expr);
+
+      /* Only interested in binary opexprs */
+      if (list_length(expr->args) != 2)
+        continue;
+
+      left = (Expr *)linitial(expr->args);
+      right = (Expr *)lsecond(expr->args);
+
+      /*
+       * Looking for expressions like "EXPR OP CONST" or "CONST OP EXPR"
+       *
+       * XXX Currently only Var as expression is supported. Will be
+       * extended in future.
+       */
+      if (IsA(right, Const))
+      {
+        if (!IsA(left, Var))
+          continue;
+        v = (Var *)left;
+        c = (Const *)right;
+        opno = expr->opno;
+      }
+      else if (IsA(left, Const))
+      {
+        /* reverse order (CONST OP VAR) */
+        if (!IsA(right, Var))
+          continue;
+        v = (Var *)right;
+        c = (Const *)left;
+        opno = get_commutator(expr->opno);
+      }
+      else
+      {
+        continue;
+      }
+
+      filter.attnum = v->varattno;
+      filter.value = c;
+    }
+  }
+}
+
 static void
 destory_db721_state(void *arg)
 {
-  Db721FdwExecutionState* festate = (Db721FdwExecutionState*) arg;
-  if (festate) {
+  Db721FdwExecutionState *festate = (Db721FdwExecutionState *)arg;
+  if (festate)
+  {
     delete festate;
   }
 }
@@ -129,10 +221,8 @@ parser_db721_file(std::string_view json, Db721FdwPlanState *fdw_private) noexcep
         fcbs.value_in_block = cur_stat["num"]->get<int>();
         // may be the value be recongnized int
         // so need to judge
-        fcbs.max = cur_stat["max"]->is<int>() ? cur_stat["max"]->get<int>() :
-                                                cur_stat["max"]->get<float>();
-        fcbs.min = cur_stat["min"]->is<int>() ? cur_stat["min"]->get<int>() :
-                                                cur_stat["min"]->get<float>();
+        fcbs.max = cur_stat["max"]->is<int>() ? cur_stat["max"]->get<int>() : cur_stat["max"]->get<float>();
+        fcbs.min = cur_stat["min"]->is<int>() ? cur_stat["min"]->get<int>() : cur_stat["min"]->get<float>();
         cd.float_block_stat.insert(make_pair(item.first, fcbs));
       }
       else if (cd.type_name == "int")
@@ -186,7 +276,9 @@ extern "C" void db721_GetForeignRelSize(PlannerInfo *root, RelOptInfo *baserel,
 {
   Db721FdwPlanState *fdw_private = (Db721FdwPlanState *)palloc0(sizeof(Db721FdwPlanState));
   uint64 total_rows = 0;
+  Db721Filter filter;
   get_table_options(foreigntableid, fdw_private);
+  set_filter(baserel->baserestrictinfo, filter);
   myutil::FileReader openfile;
   openfile.Open(fdw_private->filename);
   uint32_t meta_size = openfile.Seek(-JSON_META_SIZE, std::ios_base::end).ReadUInt32();
@@ -263,9 +355,9 @@ db721_GetForeignPlan(PlannerInfo *root, RelOptInfo *baserel, Oid foreigntableid,
 
 extern "C" void db721_BeginForeignScan(ForeignScanState *node, int eflags)
 {
-  MemoryContextCallback      *callback;
+  MemoryContextCallback *callback;
   ForeignScan *plan = (ForeignScan *)node->ss.ps.plan;
-  EState      *estate = node->ss.ps.state;
+  EState *estate = node->ss.ps.state;
   MemoryContext reader_cxt;
   MemoryContext cxt = estate->es_query_cxt;
   reader_cxt = AllocSetContextCreate(cxt, "db721_fdw tuple data", ALLOCSET_DEFAULT_SIZES);
@@ -273,9 +365,9 @@ extern "C" void db721_BeginForeignScan(ForeignScanState *node, int eflags)
   Db721FdwExecutionState *festate = new Db721FdwExecutionState(fdw_private->filename, fdw_private->columns_desc, reader_cxt);
   festate->open();
 
-  callback = (MemoryContextCallback *) palloc(sizeof(MemoryContextCallback));
+  callback = (MemoryContextCallback *)palloc(sizeof(MemoryContextCallback));
   callback->func = destory_db721_state;
-  callback->arg = (void* )festate;
+  callback->arg = (void *)festate;
   MemoryContextRegisterResetCallback(reader_cxt, callback);
   node->fdw_state = festate;
 }
@@ -289,15 +381,19 @@ extern "C" void db721_BeginForeignScan(ForeignScanState *node, int eflags)
 extern "C" TupleTableSlot *db721_IterateForeignScan(ForeignScanState *node)
 {
   Db721FdwExecutionState *festate = (Db721FdwExecutionState *)node->fdw_state;
-  std::string  error;
+  std::string error;
   TupleTableSlot *slot = node->ss.ss_ScanTupleSlot;
   ExecClearTuple(slot);
-  try {
+  try
+  {
     festate->next(slot);
-  } catch(std::exception &e) {
+  }
+  catch (std::exception &e)
+  {
     error = e.what();
   }
-  if (!error.empty()) {
+  if (!error.empty())
+  {
     elog(ERROR, "db721_fdw: %s", error.c_str());
   }
   return slot;
@@ -316,5 +412,4 @@ extern "C" void db721_ReScanForeignScan(ForeignScanState *node)
 
 extern "C" void db721_EndForeignScan(ForeignScanState *node)
 {
-
 }

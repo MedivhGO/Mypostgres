@@ -75,6 +75,12 @@ struct ColumnReader
   std::string type_name;
 };
 
+struct Db721Filter
+{
+  AttrNumber attnum;
+  Const* value;
+};
+
 class DB721FileReader : public FileReader
 {
 public:
